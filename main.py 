@@ -1,0 +1,148 @@
+import telebot
+from telebot import types
+import sqlite3
+
+# --- কনফিগারেশন ---
+API_TOKEN = '8033220778:AAFdkeKk6fEviqpHj0H9gqFxp8rvS13ZbZ0'
+ADMIN_ID = 7617639535 
+
+bot = telebot.TeleBot(API_TOKEN)
+
+# --- ডাটাবেজ সেটআপ ---
+conn = sqlite3.connect('yt_income.db', check_same_thread=False)
+cursor = conn.cursor()
+cursor.execute('''CREATE TABLE IF NOT EXISTS users 
+                  (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, pin TEXT, balance REAL, referred_by INTEGER)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS work 
+                  (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, status TEXT)''')
+cursor.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+
+# ডিফল্ট পাসওয়ার্ড সেট করা থাকছে
+cursor.execute("INSERT OR IGNORE INTO settings VALUES ('gmail_pass', 'Dhaka@2026')")
+conn.commit()
+
+def get_current_pass():
+    cursor.execute("SELECT value FROM settings WHERE key='gmail_pass'")
+    res = cursor.fetchone()
+    return res[0] if res else "Dhaka@2026"
+
+def get_user(user_id):
+    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    return cursor.fetchone()
+
+# --- অ্যাডমিন কমান্ড: পাসওয়ার্ড পরিবর্তন ---
+@bot.message_handler(commands=['setpass'])
+def set_password(message):
+    if message.from_user.id == ADMIN_ID:
+        msg = bot.send_message(message.chat.id, "নতুন জিমেইল পাসওয়ার্ডটি লিখুন:")
+        bot.register_next_step_handler(msg, update_pass)
+    else:
+        bot.send_message(message.chat.id, "❌ আপনি অ্যাডমিন নন।")
+
+def update_pass(message):
+    new_pass = message.text
+    cursor.execute("UPDATE settings SET value=? WHERE key='gmail_pass'", (new_pass,))
+    conn.commit()
+    bot.send_message(message.chat.id, f"✅ পাসওয়ার্ড আপডেট হয়েছে! এখন থেকে ইউজাররা `{new_pass}` দেখবে।")
+
+# --- মূল কমান্ডস ---
+@bot.message_handler(commands=['start'])
+def start(message):
+    user = get_user(message.from_user.id)
+    text_split = message.text.split()
+    referrer = int(text_split[1]) if len(text_split) > 1 and text_split[1].isdigit() else None
+
+    if not user:
+        bot.send_message(message.chat.id, "স্বাগতম! আপনার নাম লিখুন:")
+        bot.register_next_step_handler(message, process_name, referrer)
+    else:
+        bot.send_message(message.chat.id, "🔒 ৪ ডিজিটের পিন দিয়ে প্রবেশ করুন:")
+        bot.register_next_step_handler(message, check_pin)
+
+def process_name(message, referrer):
+    name = message.text
+    bot.send_message(message.chat.id, "আপনার বিকাশ বা নগদ নম্বর দিন:")
+    bot.register_next_step_handler(message, process_phone, name, referrer)
+
+def process_phone(message, name, referrer):
+    phone = message.text
+    bot.send_message(message.chat.id, "লগইনের জন্য একটি ৪ ডিজিটের পিন সেট করুন:")
+    bot.register_next_step_handler(message, process_pin, name, phone, referrer)
+
+def process_pin(message, name, phone, referrer):
+    pin = message.text
+    if len(pin) == 4 and pin.isdigit():
+        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)", (message.from_user.id, name, phone, pin, 0.0, referrer))
+        conn.commit()
+        bot.send_message(message.chat.id, "✅ অ্যাকাউন্ট সফল! এখন /start দিন।")
+    else:
+        bot.send_message(message.chat.id, "❌ পিন অবশ্যই ৪ সংখ্যার হতে হবে।")
+
+def check_pin(message):
+    user = get_user(message.from_user.id)
+    if user and message.text == user[3]:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("📧 জিমেইল জমা দিন", "💰 ব্যালেন্স")
+        markup.add("👥 রেফার করুন", "🏧 উইথড্র")
+        bot.send_message(message.chat.id, "ড্যাশবোর্ড মেনু:", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, "❌ ভুল পিন! আবার /start দিন।")
+
+# --- জিমেইল জমা দেওয়া (পাসওয়ার্ড দেখানোর জায়গা) ---
+@bot.message_handler(func=lambda message: message.text == "📧 জিমেইল জমা দিন")
+def work_start(message):
+    current_pass = get_current_pass()
+    msg = f"নিচের পাসওয়ার্ডটি ব্যবহার করে জিমেইল খুলুন:\n\nপাসওয়ার্ড: `{current_pass}`\n\nজিমেইলটি খোলা হয়ে গেলে শুধুমাত্র ইমেইলটি এখানে পাঠান।"
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+    bot.register_next_step_handler(message, handle_gmail)
+
+def handle_gmail(message):
+    email = message.text.strip().lower()
+    if "@gmail.com" not in email:
+        bot.send_message(message.chat.id, "❌ ভুল ফরম্যাট! সঠিক জিমেইল দিন।")
+        return
+    
+    cursor.execute("INSERT INTO work (user_id, email, status) VALUES (?, ?, ?)", (message.from_user.id, email, 'pending'))
+    conn.commit()
+    work_id = cursor.lastrowid
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Approve", callback_data=f"app_{work_id}_{message.from_user.id}"),
+               types.InlineKeyboardButton("Reject", callback_data=f"rej_{work_id}_{message.from_user.id}"))
+    
+    bot.send_message(ADMIN_ID, f"নতুন কাজ জমা হয়েছে!\nইউজার আইডি: {message.from_user.id}\nইমেইল: {email}\nব্যবহৃত পাসওয়ার্ড: {get_current_pass()}", reply_markup=markup)
+    bot.send_message(message.chat.id, "📩 জমা হয়েছে! অ্যাডমিন চেক করলে ৮ টাকা পাবেন।")
+
+# --- অ্যাডমিন অ্যাকশন ---
+@bot.callback_query_handler(func=lambda call: True)
+def admin_action(call):
+    data = call.data.split('_')
+    if data[0] == "app":
+        cursor.execute("UPDATE users SET balance = balance + 8 WHERE id=?", (data[2],))
+        cursor.execute("SELECT referred_by FROM users WHERE id=?", (data[2],))
+        res = cursor.fetchone()
+        if res and res[0]:
+            cursor.execute("UPDATE users SET balance = balance + 1 WHERE id=?", (res[0],))
+        conn.commit()
+        bot.edit_message_text("✅ Approved", call.message.chat.id, call.message.message_id)
+        bot.send_message(data[2], "💰 অভিনন্দন! আপনার ৮ টাকা ব্যালেন্সে যোগ হয়েছে।")
+    else:
+        bot.edit_message_text("❌ Rejected", call.message.chat.id, call.message.message_id)
+        bot.send_message(data[2], "❌ আপনার জমা দেওয়া জিমেইলটি রিজেক্ট করা হয়েছে।")
+
+# --- ব্যালেন্স ও অন্যান্য ---
+@bot.message_handler(func=lambda message: message.text == "💰 ব্যালেন্স")
+def b_check(message):
+    u = get_user(message.from_user.id)
+    bot.send_message(message.chat.id, f"আপনার বর্তমান ব্যালেন্স: {u[4]} টাকা।")
+
+@bot.message_handler(func=lambda message: message.text == "👥 রেফার করুন")
+def r_check(message):
+    link = f"https://t.me/{bot.get_me().username}?start={message.from_user.id}"
+    bot.send_message(message.chat.id, f"আপনার রেফার লিংক: `{link}`\nপ্রতি রেফারেল কাজের জন্য ১ টাকা বোনাস পাবেন!", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == "🏧 উইথড্র")
+def w_check(message):
+    bot.send_message(message.chat.id, "১০০ টাকা হলে উইথড্র অপশন চালু হবে।")
+
+bot.polling(none_stop=True)
