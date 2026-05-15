@@ -1,0 +1,160 @@
+import telebot # 'I'   
+from telebot import types
+import sqlite3
+import os
+
+# ---  ---
+#      
+API_TOKEN = '8033220778:AAFdkeKk6fEviqpHj0H9gqFxp8rvS13ZbZ0'
+ADMIN_ID = 7617639535 
+
+bot = telebot.TeleBot(API_TOKEN)
+
+# ---   ---
+# Render-     path   
+db_path = 'yt_income.db'
+conn = sqlite3.connect(db_path, check_same_thread=False)
+cursor = conn.cursor()
+
+def create_tables():
+    cursor.execute('''CREATE TABLE IF NOT EXISTS users 
+                      (id INTEGER PRIMARY KEY, name TEXT, phone TEXT, pin TEXT, balance REAL, referred_by INTEGER)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS work 
+                      (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, email TEXT, status TEXT)''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)''')
+    
+    #     
+    cursor.execute("INSERT OR IGNORE INTO settings VALUES ('gmail_pass', 'Dhaka@2026')")
+    conn.commit()
+
+create_tables()
+
+def get_current_pass():
+    cursor.execute("SELECT value FROM settings WHERE key='gmail_pass'")
+    res = cursor.fetchone()
+    return res[0] if res else "Dhaka@2026"
+
+def get_user(user_id):
+    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    return cursor.fetchone()
+
+# ---  :   ---
+@bot.message_handler(commands=['setpass'])
+def set_password(message):
+    if message.from_user.id == ADMIN_ID:
+        msg = bot.send_message(message.chat.id, "   :")
+        bot.register_next_step_handler(msg, update_pass)
+    else:
+        bot.send_message(message.chat.id, "   !")
+
+def update_pass(message):
+    new_pass = message.text
+    cursor.execute("UPDATE settings SET value=? WHERE key='gmail_pass'", (new_pass,))
+    conn.commit()
+    bot.send_message(message.chat.id, f"   !    `{new_pass}` ")
+
+# ---   ---
+@bot.message_handler(commands=['start'])
+def start(message):
+    user = get_user(message.from_user.id)
+    text_split = message.text.split()
+    referrer = int(text_split[1]) if len(text_split) > 1 and text_split[1].isdigit() else None
+
+    if not user:
+        bot.send_message(message.chat.id, "!   :")
+        bot.register_next_step_handler(message, process_name, referrer)
+    else:
+        bot.send_message(message.chat.id, "      :")
+        bot.register_next_step_handler(message, check_pin)
+
+def process_name(message, referrer):
+    name = message.text
+    bot.send_message(message.chat.id, "     :")
+    bot.register_next_step_handler(message, process_phone, name, referrer)
+
+def process_phone(message, name, referrer):
+    phone = message.text
+    bot.send_message(message.chat.id, "       :")
+    bot.register_next_step_handler(message, process_pin, name, phone, referrer)
+
+def process_pin(message, name, phone, referrer):
+    pin = message.text
+    if len(pin) == 4 and pin.isdigit():
+        cursor.execute("INSERT INTO users VALUES (?, ?, ?, ?, ?, ?)", (message.from_user.id, name, phone, pin, 0.0, referrer))
+        conn.commit()
+        bot.send_message(message.chat.id, "  !  /start ")
+    else:
+        bot.send_message(message.chat.id, "      ")
+
+def check_pin(message):
+    user = get_user(message.from_user.id)
+    if user and message.text == user[3]:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("   ", " ")
+        markup.add("  ", " ")
+        bot.send_message(message.chat.id, " :", reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, "  !  /start ")
+
+# ---    ---
+@bot.message_handler(func=lambda message: message.text == "   ")
+def work_start(message):
+    current_pass = get_current_pass()
+    msg = f"     :\n\n: `{current_pass}`\n\n       "
+    bot.send_message(message.chat.id, msg, parse_mode="Markdown")
+    bot.register_next_step_handler(message, handle_gmail)
+
+def handle_gmail(message):
+    email = message.text.strip().lower()
+    if "@gmail.com" not in email:
+        bot.send_message(message.chat.id, "  !   ")
+        return
+    
+    cursor.execute("INSERT INTO work (user_id, email, status) VALUES (?, ?, ?)", (message.from_user.id, email, 'pending'))
+    conn.commit()
+    work_id = cursor.lastrowid
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("Approve", callback_data=f"app_{work_id}_{message.from_user.id}"),
+               types.InlineKeyboardButton("Reject", callback_data=f"rej_{work_id}_{message.from_user.id}"))
+    
+    bot.send_message(ADMIN_ID, f"   !\n : {message.from_user.id}\n: {email}\n : {get_current_pass()}", reply_markup=markup)
+    bot.send_message(message.chat.id, "  !      ")
+
+# ---   ---
+@bot.callback_query_handler(func=lambda call: True)
+def admin_action(call):
+    data = call.data.split('_')
+    if data[0] == "app":
+        cursor.execute("UPDATE users SET balance = balance + 8 WHERE id=?", (data[2],))
+        cursor.execute("SELECT referred_by FROM users WHERE id=?", (data[2],))
+        res = cursor.fetchone()
+        if res and res[0]:
+            cursor.execute("UPDATE users SET balance = balance + 1 WHERE id=?", (res[0],))
+        conn.commit()
+        bot.edit_message_text(" Approved", call.message.chat.id, call.message.message_id)
+        bot.send_message(data[2], " !      ")
+    elif data[0] == "rej":
+        bot.edit_message_text(" Rejected", call.message.chat.id, call.message.message_id)
+        bot.send_message(data[2], "       ")
+
+# ---    ---
+@bot.message_handler(func=lambda message: message.text == " ")
+def b_check(message):
+    u = get_user(message.from_user.id)
+    if u:
+        bot.send_message(message.chat.id, f"  : {u[4]} ")
+
+@bot.message_handler(func=lambda message: message.text == "  ")
+def r_check(message):
+    bot_info = bot.get_me()
+    link = f"https://t.me/{bot_info.username}?start={message.from_user.id}"
+    bot.send_message(message.chat.id, f"  : `{link}`\n      !", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == " ")
+def w_check(message):
+    bot.send_message(message.chat.id, "      ")
+
+#   
+print("Bot is running...")
+bot.polling(none_stop=True)
